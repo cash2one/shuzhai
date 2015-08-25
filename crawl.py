@@ -11,8 +11,9 @@ import re, os
 import time
 import chardet
 import sys
-from mongo import writeToMongo
+from mongo import writeToMongo,checkDocExsists
 from timeConvertor import parse_datetime
+from snowLNP import getKeyWords
 
 class ShuzhaiCrawl:
     client = MongoClient()
@@ -21,23 +22,92 @@ class ShuzhaiCrawl:
     collection = db['shuzhai_lists']
     # Browse to Rap Genius
     browser = RoboBrowser(history=True,user_agent='Mozilla/5.0 ... Safari/537.36')
+    browserHeaders = {'Accept-Language': 'zh,en-US;q=0.8,en;q=0.6,zh-CN;q=0.4,zh-TW;q=0.2',"Content-Type":"text/html; charset=GB2312",
+                     'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/43.0.2357.81 Safari/537.3'}
 
     def crawTengxun(self):
-        start = 1
-        end = 5
+        start = 27
+        end = 50
         urlStr = "http://cul.qq.com/c/shuzhaiList_%d.htm"
         for x in range(start,end):
             finalUrl = urlStr % (x)
-            self.browser.open(finalUrl,method='get',headers={'Accept-Language': 'zh,en-US;q=0.8,en;q=0.6,zh-CN;q=0.4,zh-TW;q=0.2',"Content-Type":"text/html; charset=GB2312",
-                                                                                                      'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/43.0.2357.81 Safari/537.3'})
+            print(x)
+            print(finalUrl)
+            self.browser.open(finalUrl,method='get',headers=self.browserHeaders)
             if self.browser.response.status_code is not 200:
                 break
             else:
                 lists = self.browser.select('#listZone1 li')
-                text = lists[0]
-                text
-                #print(self.browser.parsed)
+                for book in lists:
+                    getAuthorLine = False
+                    bookListingObj = BookListing()
+                    bookListingObj.sectionTitle = book.select('a')[0].text
+                    print(bookListingObj.sectionTitle)
+                    bookListingObj.intro = book.select('.instro')[0].text
+                    bookListingObj.createTime = int(time.time())
+                    temphref = book.select('a')[0]['href'].split("/")
+                    lastNum = str(temphref[-1]).split('.')[0]
+                    fullNum = str(temphref[-2])+lastNum
+                    bookListingObj.url = "http://shipei.qq.com/c/cul/"+fullNum
+                    print(bookListingObj.url)
+                    bookListingObj.docid = fullNum
+                    # check if doc alreay exists
+                    if checkDocExsists(str(bookListingObj.docid)):
+                        print('Continue because article exesists')
+                        continue
+
+                    bookListingObj.imgs = []
+
+                    self.browser.open(bookListingObj.url,method='get',headers=self.browserHeaders)
+
+                    #test = self.browser.select('p~=著')
+
+                    contents = self.browser.select('.split')
+                    textBody = ''
+                    for line in contents:
+                        if getAuthorLine == False and line.text.find(u'》')!=-1 and line.text.find(u'《')!=-1 and line.text.find(u'出版')!=-1 and line.text.find(u'年')!=-1  and line.text.find(u'月')!=-1 :
+                            #print(line.text)
+                            try:
+                                bookInfo = self.parseTengxunAuthorLine(line.text)
+                                bookListingObj.bookTitle = bookInfo['bookTitle']
+                                bookListingObj.initTime = bookInfo['publishiTime']
+                                bookListingObj.publisher = bookInfo['publisher']
+                                bookListingObj.author = bookInfo['author']
+                                getAuthorLine=True
+                            except:
+                                pass
+
+                        elif len(line.select('img'))>0:
+                            imgline = line.select('img')[0]
+                            imgurl = imgline.attrs['src']
+                            bookListingObj.imgs.append(imgurl)
+
+                    if(len(contents)==0):
+                        print('Continue because no contents')
+                        continue
+
+                    bookListingObj.textBody = contents[-1].text.replace(u"（本文为腾讯文化签约的合作方内容，未经允许不得转载）",'').replace(u"　　",'\n\n')
+                    categoryList = self.getCategory(bookListingObj.textBody)
+                    bookListingObj.categoryid = categoryList[0]
+                    bookListingObj.category = categoryList[1]
+                    bookListingObj.keywords = getKeyWords(bookListingObj.textBody,3)
+                    #print(bookListingObj.__dict__)
+                    print("MongoPostId:"+ str(writeToMongo(bookListingObj.__dict__)))
+
                 pass
+
+    def parseTengxunAuthorLine(self,lineText):
+        segments = lineText.split(u'，')
+        bookInfo = {}
+        try:
+            bookInfo['bookTitle'] = segments[0]
+            bookInfo['publishiTime'] = parse_datetime(segments[-1])
+            bookInfo['publisher'] = segments[-2]
+            bookInfo['author'] = "".join(segments[1:-2])
+            return bookInfo
+        except:
+            return {}
+
 
     def convert_utf(self, body , text):
         content_type = chardet.detect(body)
@@ -111,7 +181,11 @@ class ShuzhaiCrawl:
                                                          'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/43.0.2357.81 Safari/537.3'})
             if len(self.browser.select('.chapter-title'))==0: return
             sectionTitle = self.browser.select('.chapter-title')[0].text
-            bookTitle = self.browser.select('.chapter-caption > span')[0].text
+            try:
+                bookTitle = self.browser.select('.chapter-caption > span')[0].text
+            except:
+                bookTitle = ''
+                print('can not parse book title:'+url)
             author =  self.browser.select('.chapter-caption a')[0].text if len(self.browser.select('.chapter-caption a'))>0 else ''
             contents = self.browser.select('.novel p')
             textbody = self.makeupcontent(contents)
@@ -124,8 +198,7 @@ class ShuzhaiCrawl:
             bookListingObj.author = author
             bookListingObj.textBody = textbody
         else:
-            self.browser.open(url,method='get',headers={'Accept-Language': 'zh,en-US;q=0.8,en;q=0.6,zh-CN;q=0.4,zh-TW;q=0.2',
-                                                         'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/43.0.2357.81 Safari/537.3'})
+            self.browser.open(url,method='get',headers = self.browserHeaders)
             #Style 1
             if len(self.browser.select(".blk_abstract"))>0:
                 try:
@@ -182,12 +255,16 @@ class ShuzhaiCrawl:
 
 
     def getCategory(self,text):
-        self.browser.open('http://nlp.csai.tsinghua.edu.cn/app/ClassifierSys/FrontPage.jsp',headers={'Accept-Language': 'zh,en-US;q=0.8,en;q=0.6,zh-CN;q=0.4,zh-TW;q=0.2',
-                                                                                                  'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/43.0.2357.81 Safari/537.3'})
-        form = self.browser.get_form(action="Result.jsp")
-        textArea = form['article']
-        textArea.value = text
-        self.browser.submit_form(form)
+        try:
+            self.browser.open('http://nlp.csai.tsinghua.edu.cn/app/ClassifierSys/FrontPage.jsp',headers={'Accept-Language': 'zh,en-US;q=0.8,en;q=0.6,zh-CN;q=0.4,zh-TW;q=0.2',
+                                                                                                 'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/43.0.2357.81 Safari/537.3'})
+            form = self.browser.get_form(action="Result.jsp")
+            textArea = form['article']
+            textArea.value = text
+
+            self.browser.submit_form(form)
+        except:
+            return[-1,'none']
         results = self.browser.select('.STYLE7')
         categoryId = results[0].text
         categoryName = results[1].text
@@ -201,7 +278,7 @@ class ShuzhaiCrawl:
         for line in lines:
             content+=line.text
             content+="\n\n"
-        return content
+        return content.replace("<br>","")
 
 
 
@@ -212,7 +289,7 @@ class ShuzhaiCrawl:
 #print(bookL.to_JSON())
 #print(int(time.time()))
 a = ShuzhaiCrawl()
-#a.processWeibo('weibo_lid_560.json')
+#a.processWeibo('weibo_lid_542.json')
 #print(parse_datetime(u"1995年6月10号下午3点41分50秒"))
 #a.crawlWeibo()
 

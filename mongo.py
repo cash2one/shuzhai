@@ -3,9 +3,6 @@ __author__ = 'vincentnewpro'
 import pymongo
 import datetime
 from pymongo import MongoClient
-import json
-
-
 client = MongoClient()
 client = MongoClient('107.170.115.138', 27017)
 
@@ -14,7 +11,13 @@ collection = db['BookListings']
 
 def writeToMongo(post):
     if collection.find_one({"docid":post["docid"]}) is None:
-        post_id = collection.insert_one(post).inserted_id
+        return collection.insert_one(post).inserted_id
 
+def checkDocExsists(docid):
+    if collection.find_one({"docid":docid}) is None:
+        return False
+    else:
+        return True
 
-print(collection.find_one())
+#print(collection.find_one())
+print(checkDocExsists('912201'))
